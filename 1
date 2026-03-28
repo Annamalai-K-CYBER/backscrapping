@@ -1,0 +1,324 @@
+const express = require("express");
+const cors = require("cors");
+const { chromium } = require("playwright");
+
+const app = express();
+app.use(cors());
+
+/**
+ * ⚙ CONFIG
+ */
+const CONCURRENCY = 4;
+const TIMEOUT = 60000;
+
+/**
+ * ⚡ CONTEXT OPTIMIZATION
+ */
+async function createFastContext(browser) {
+  const context = await browser.newContext();
+
+  await context.route("**/*", route => {
+    const type = route.request().resourceType();
+    if (["image", "stylesheet", "font", "media"].includes(type)) {
+      route.abort();
+    } else {
+      route.continue();
+    }
+  });
+
+  return context;
+}
+
+/**
+ * ⚡ SCROLL
+ */
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    const panel = document.querySelector('div[role="feed"]');
+
+    for (let i = 0; i < 30; i++) {
+      panel.scrollBy(0, 3000);
+      await new Promise(r => setTimeout(r, 400));
+    }
+  });
+}
+
+/**
+ * ⚡ GET LINKS
+ */
+async function getLinks(page, query) {
+  const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: TIMEOUT });
+  await page.waitForSelector('div[role="feed"]');
+
+  await autoScroll(page);
+
+  const links = await page.$$eval(".Nv2PK a", els =>
+    [...new Set(els.map(e => e.href).filter(Boolean))]
+  );
+
+  return links.slice(0, 50);
+}
+
+/**
+ * ⚡ FAST SCRAPER (LIST VIEW)
+ */
+async function fastScrape(query) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await createFastContext(browser);
+  const page = await context.newPage();
+
+  await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(query)}`);
+  await page.waitForSelector('div[role="feed"]');
+
+  await autoScroll(page);
+
+  const results = await page.$$eval(".Nv2PK", cards =>
+    cards.map(card => {
+      const clean = txt =>
+        txt?.replace(/[^\x20-\x7E]/g, "").trim() || "";
+
+      const name = clean(card.querySelector(".qBF1Pd")?.innerText);
+      const rating = clean(card.querySelector(".MW4etd")?.innerText);
+
+      const info = [...card.querySelectorAll(".W4Efsd span")]
+        .map(e => clean(e.innerText))
+        .filter(Boolean);
+
+      const filtered = info.filter(t =>
+        !t.match(/^\d+(\.\d+)?$/) &&
+        !t.toLowerCase().includes("review") &&
+        !t.includes("★")
+      );
+
+      const address = filtered.sort((a, b) => b.length - a.length)[0] || "";
+
+      return {
+        name,
+        rating,
+        address,
+        link: card.querySelector("a")?.href || ""
+      };
+    })
+  );
+
+  await browser.close();
+  return results;
+}
+
+/**
+ * 🧠 DETAIL SCRAPER (FINAL FIXED)
+ */
+async function scrapeOne(context, link) {
+  const page = await context.newPage();
+
+  try {
+    // ✅ IMPORTANT CHANGE
+    await page.goto(link, { waitUntil: "networkidle", timeout: TIMEOUT });
+
+    await page.waitForSelector("h1", { timeout: 15000 });
+    await page.waitForTimeout(2500);
+
+    const data = await page.evaluate(() => {
+      const clean = txt =>
+        txt?.replace(/[^\x20-\x7E]/g, "").trim() || "";
+
+      const getText = sel =>
+        clean(document.querySelector(sel)?.innerText);
+
+      const getAttr = (sel, attr) =>
+        document.querySelector(sel)?.getAttribute(attr) || "";
+
+      const allText = document.body.innerText;
+
+      // ⭐ RATING + REVIEWS
+      let rating = "";
+      let reviews = "";
+
+      const ratingEl = document.querySelector('div[role="img"]');
+      if (ratingEl) {
+        const label = ratingEl.getAttribute("aria-label") || "";
+        const m = label.match(/([\d.]+).*?([\d,]+)/);
+        if (m) {
+          rating = m[1];
+          reviews = m[2];
+        }
+      }
+
+      if (!rating) {
+        rating = getText(".MW4etd");
+      }
+
+      if (!reviews) {
+        const m = allText.match(/([\d,]+)\s+reviews/);
+        if (m) reviews = m[1];
+      }
+
+      // 📍 ADDRESS
+      const address = getText('[data-item-id="address"]');
+
+      // 📞 PHONE
+      let phone = getText('[data-item-id="phone"]');
+      if (!phone) {
+        const m = allText.match(/\+?\d[\d\s-]{8,}/);
+        if (m) phone = clean(m[0]);
+      }
+
+      // 🌐 WEBSITE
+      let website = getAttr('a[data-item-id="authority"]', "href");
+      if (!website) {
+        const links = [...document.querySelectorAll("a")];
+        const ext = links.find(a =>
+          a.href &&
+          !a.href.includes("google") &&
+          a.href.startsWith("http")
+        );
+        if (ext) website = ext.href;
+      }
+
+      // 📌 CATEGORY
+      const category =
+        getText('button[jsaction="pane.rating.category"]') ||
+        getText(".DkEaL");
+
+      // 📍 COORDINATES (🔥 FINAL FIX)
+      let latitude = "";
+      let longitude = "";
+
+      const url = window.location.href;
+
+      // Method 1
+      let m1 = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+      if (m1) {
+        latitude = m1[1];
+        longitude = m1[2];
+      }
+
+      // Method 2 (MOST IMPORTANT)
+      if (!latitude) {
+        let m2 = url.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+        if (m2) {
+          latitude = m2[1];
+          longitude = m2[2];
+        }
+      }
+
+      // Method 3 fallback
+      if (!latitude) {
+        const meta = document.querySelector('meta[property="og:image"]')?.content;
+        const m3 = meta?.match(/center=(-?\d+\.\d+),(-?\d+\.\d+)/);
+        if (m3) {
+          latitude = m3[1];
+          longitude = m3[2];
+        }
+      }
+
+      return {
+        name: getText("h1"),
+        rating,
+        reviews,
+        address,
+        phone,
+        website,
+        category,
+        latitude,
+        longitude,
+        url
+      };
+    });
+
+    await page.close();
+    return data;
+
+  } catch (err) {
+    console.log("❌ Failed:", link);
+    await page.close();
+    return null;
+  }
+}
+
+/**
+ * 🚀 FULL SCRAPER
+ */
+async function fullScrape(query) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await createFastContext(browser);
+
+  const page = await context.newPage();
+
+  let links = await getLinks(page, query);
+  await page.close();
+
+  let results = [];
+  let index = 0;
+
+  async function worker() {
+    while (index < links.length) {
+      const link = links[index++];
+
+      let data = null;
+
+      for (let i = 0; i < 3; i++) {
+        data = await scrapeOne(context, link);
+        if (data && data.name) break;
+      }
+
+      if (data) {
+        console.log("✔", data.name);
+        results.push(data);
+      }
+
+      await new Promise(r => setTimeout(r, 400)); // anti-block
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: CONCURRENCY }, () => worker())
+  );
+
+  await browser.close();
+  return results;
+}
+
+/**
+ * 🌐 ROUTES
+ */
+app.get("/", (req, res) => {
+  res.send("🚀 FINAL Google Maps Scraper (LAT/LNG FIXED)");
+});
+
+app.get("/api/maps", async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.status(400).json({ error: "Missing query" });
+
+  const data = await fastScrape(q);
+
+  res.json({
+    success: true,
+    mode: "fast",
+    count: data.length,
+    data
+  });
+});
+
+app.get("/api/full", async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.status(400).json({ error: "Missing query" });
+
+  const data = await fullScrape(q);
+
+  res.json({
+    success: true,
+    mode: "full",
+    count: data.length,
+    data
+  });
+});
+
+/**
+ * 🚀 START SERVER
+ */
+app.listen(5000, () => {
+  console.log("🚀 Server running at http://localhost:5000");
+});
