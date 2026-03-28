@@ -24,12 +24,27 @@ const TIMEOUT = 60000;
 const PORT = process.env.PORT || 5000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 
+// Get base URL for Render compatibility
+const BASE_URL = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || `http://localhost:${PORT}`;
+
 // 🔑 API KEYS & CONFIG (Load from environment)
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/ai_queries";
+const MONGODB_URI = process.env.MONGODB_URI;
 
-if (!OPENROUTER_API_KEY) {
-  console.warn("⚠️ WARNING: OPENROUTER_API_KEY not set in environment variables");
+// ⚠️ Validate required environment variables
+const missingVars = [];
+if (!OPENROUTER_API_KEY) missingVars.push("OPENROUTER_API_KEY");
+if (!MONGODB_URI) missingVars.push("MONGODB_URI");
+if (!process.env.IMAGEKIT_PUBLIC_KEY) missingVars.push("IMAGEKIT_PUBLIC_KEY");
+if (!process.env.IMAGEKIT_PRIVATE_KEY) missingVars.push("IMAGEKIT_PRIVATE_KEY");
+if (!process.env.IMAGEKIT_URL_ENDPOINT) missingVars.push("IMAGEKIT_URL_ENDPOINT");
+
+if (missingVars.length > 0) {
+  console.error("❌ ERROR: Missing required environment variables:", missingVars.join(", "));
+  console.error("⚠️  Please set them in your Render environment settings");
+  if (NODE_ENV === "production") {
+    process.exit(1);
+  }
 }
 
 // 🔐 Rate Limiting Middleware
@@ -102,7 +117,7 @@ async function generateQueryVariations(baseQuery, count = 10) {
       {
         headers: {
           "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "http://localhost:5000",
+          "HTTP-Referer": BASE_URL,
           "X-Title": "Maps Scraper",
           "Content-Type": "application/json"
         },
@@ -745,17 +760,32 @@ app.get("/api/scrape-history", async (req, res) => {
  * 🚀 START SERVER
  */
 
-
 connectDB().catch(err => console.log("MongoDB connection warning:", err.message));
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log("\n╔════════════════════════════════════════╗");
-  console.log("║   🚀 Server running at http://localhost:" + PORT + "         ║");
+  console.log("║   🚀 Server running at " + BASE_URL + "         ║");
   console.log("║   ✅ Features:                            ║");
   console.log("║      - Google Maps Scraper                ║");
   console.log("║      - OpenRouter AI (10x calls)          ║");
   console.log("║      - Excel Export                       ║");
   console.log("║      - ImageKit Upload                    ║");
   console.log("║      - MongoDB Storage                    ║");
+  console.log("║   🌍 Environment: " + NODE_ENV + "                         ║");
   console.log("╚════════════════════════════════════════╝\n");
+});
+
+// ✅ Graceful shutdown for Render
+process.on("SIGTERM", async () => {
+  console.log("📋 SIGTERM received, shutting down gracefully...");
+  server.close(() => {
+    console.log("✅ Server closed");
+    process.exit(0);
+  });
+  
+  // Force shutdown after 10 seconds
+  setTimeout(() => {
+    console.error("❌ Force shutdown due to timeout");
+    process.exit(1);
+  }, 10000);
 });
