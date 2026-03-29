@@ -360,7 +360,15 @@ async function getLinks(page, query) {
  * ⚡ FAST SCRAPER (LIST VIEW)
  */
 async function fastScrape(query) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+  headless: true,
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu"
+  ]
+});
   const context = await createFastContext(browser);
   const page = await context.newPage();
 
@@ -537,7 +545,15 @@ async function scrapeOne(context, link) {
  * 🚀 FULL SCRAPER
  */
 async function fullScrape(query) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+  headless: true,
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu"
+  ]
+});
   const context = await createFastContext(browser);
 
   const page = await context.newPage();
